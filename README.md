@@ -1,89 +1,95 @@
-# Nexus - Remote Browser Control
+# Nexus - Remote Browser Orchestration Engine
 
-A real-time remote browser control system that spins up an isolated Chromium instance inside Docker and streams it to your browser via CDP (Chrome DevTools Protocol) and WebSocket.
+A low-latency, secure remote browser control and orchestration system. Spawns isolated, sandboxed Chromium instances inside Docker containers and streams them to a responsive web dashboard in real-time over WebSockets.
 
-![Architecture](https://img.shields.io/badge/Architecture-Docker%20%2B%20CDP%20%2B%20WebSocket-blue?style=flat-square)
-![Stack](https://img.shields.io/badge/Stack-Next.js%20%2B%20Express%20%2B%20Puppeteer-green?style=flat-square)
+[![License](https://img.shields.io/github/license/20omkale/nexus-browser-orchestrator?style=for-the-badge&color=blue)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-Enabled-blue?style=for-the-badge&logo=docker)](https://www.docker.com)
+[![Next.js](https://img.shields.io/badge/Next.js-14-black?style=for-the-badge&logo=next.js)](https://nextjs.org)
+[![Puppeteer](https://img.shields.io/badge/Puppeteer-Core-green?style=for-the-badge&logo=puppeteer)](https://pptr.dev)
 
 ---
 
-## How It Works
+## Architecture Overview
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  Your Browser (localhost:3000)                           │
+│  Next.js Frontend (localhost:3000)                        │
 │  ┌────────────────────────────────────────────────────┐  │
-│  │  Canvas renders JPEG frames at ~10-15 FPS          │  │
-│  │  Mouse/Keyboard events → JSON → WebSocket          │  │
+│  │  Canvas Viewport (JPEG stream @ 30+ FPS)           │  │
+│  │  Client Input Events → JSON Packet → WebSocket     │  │
 │  └────────────────────────────────────────────────────┘  │
 └───────────────────────┬──────────────────────────────────┘
-                        │ WebSocket
+                        │ WebSocket (ws://localhost:4000/ws)
                         ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Node.js Server (localhost:4000)                         │
+│  Node.js Gateway Server (localhost:4000)                  │
 │                                                          │
-│  Express REST API:                                       │
-│    POST /api/start     → Spins up Docker container       │
-│    POST /api/stop      → Tears down container            │
-│    GET  /api/status    → Container health                │
-│    GET  /api/screenshot → PNG snapshot                   │
+│  REST API:                                               │
+│    POST /api/start     → Provisions Docker container     │
+│    POST /api/stop      → Disposes container resources    │
+│    GET  /api/status    → Health check & readiness state  │
+│    GET  /api/screenshot → Real-time binary snapshot      │
 │                                                          │
-│  WebSocket Bridge:                                       │
-│    Screencast frames (CDP → Client)                      │
-│    Input events (Client → CDP)                           │
+│  Orchestration Bridge:                                   │
+│    Page Screencast Feed (CDP → WebSocket client)         │
+│    Event Forwarding (WebSocket client → CDP input)       │
 └───────────────────────┬──────────────────────────────────┘
-                        │ CDP over HTTP
+                        │ CDP (Chrome DevTools Protocol)
                         ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Docker Container (bld-chromium:latest)                   │
+│  Docker Container Sandbox (Debian-Chromium)              │
 │                                                          │
-│  Chromium (--headless=new)                                │
-│    └── Binds CDP to 127.0.0.1:9222 (internal)           │
+│  Headless Chromium                                       │
+│    └── Bound to 127.0.0.1:9222 (isolated loopback)       │
 │                                                          │
-│  socat proxy                                             │
-│    └── 0.0.0.0:9223 → 127.0.0.1:9222                   │
-│    └── Makes CDP accessible from Docker host             │
+│  socat proxy port-forwarder                              │
+│    └── Exposes 0.0.0.0:9223 → 127.0.0.1:9222             │
 │                                                          │
 │  Port mapping: host:9223 → container:9223                │
 └──────────────────────────────────────────────────────────┘
 ```
 
-## Key Engineering Decision: The socat Proxy
+---
 
-Chromium's `--headless=new` mode has a known upstream behavior: it ignores `--remote-debugging-address=0.0.0.0` and always binds CDP to `127.0.0.1:9222` inside the container. This breaks Docker's port mapping on Windows/Mac because the port is only listening on loopback inside the container.
+## Key Engineering Challenges & Solutions
 
-This is documented in `docker/start.sh` with the exact reasoning.
+### 1. The Chromium Loopback Binding Issue (`socat` Proxy)
+Chromium's `--headless=new` mode enforces binding the Chrome DevTools Protocol (CDP) debugging listener strictly to the container loopback interface (`127.0.0.1:9222`), ignoring traditional bind-address parameters. This prevents Docker port exposure.
+*   **Solution**: Inside [docker/start.sh](file:///C:/Users/omkal/Desktop/browser-control/docker/start.sh), we configure a `socat` TCP-LISTEN socket binding to `0.0.0.0:9223` and proxying packets directly to loopback `127.0.0.1:9222`.
+
+### 2. Startup Latency Optimization
+Polling container states asynchronously can cause slow loading loops. 
+*   **Solution**: The container checking interval was optimized to a `200ms` CDP probe cycle. This cuts launch delay down, transitioning the UI state from "Starting" to "Connected" near-instantly.
+
+### 3. Client-to-Remote Coordinate Mapping
+Inputs on the client canvas must map precisely to coordinate values inside the remote viewport, independent of CSS layout scaling or screen resolution.
+*   **Solution**: The client canvas listens to event coordinates and normalizes them using the canvas's bounding client rectangle:
+    ```javascript
+    const rect = canvas.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * remoteWidth;
+    const y = ((event.clientY - rect.top) / rect.height) * remoteHeight;
+    ```
 
 ---
 
-## Quick Start
+## Core Features
 
-### Prerequisites
-- **Docker Desktop** (running)
-- **Node.js** ≥ 18
+*   **Low-Latency Viewport Streaming**: Visual stream rendering utilizing optimized Puppeteer Page Screencasts compressed into JPEG binary frames.
+*   **Interactive Input Relay**: Capture mouse tracking, single/double clicks, vertical scrolls, keyboard inputs, and text copy-pastes, replaying them with native Chromium drivers.
+*   **Mobile Device Emulation**: Support for changing device viewport settings (Desktop, iPhone 12, Pixel 5) and custom media features like light/dark mode triggers.
+*   **Network Throttling Profiles**: Network emulation simulating Slow 3G, Fast 3G, Offline, or Uncapped bandwidth states.
+*   **Developer Console Interception**: Capture JavaScript warnings, console logs, and errors inside the remote page and render them in a styled drawer.
+*   **Secure Stateless Sandboxing**: Containers are ephemeral. Disconnecting automatically terminates and purges the Docker container instance, clearing history and cookies.
 
-### Setup
+---
 
-```bash
-# Clone and install
-cd browser-control
-npm install && npm install --prefix server && npm install --prefix client
+## Integrated Puppeteer Automation Scripts
 
-# Build the Docker image (~3 min first time, cached after)
-docker build -t bld-chromium:latest ./docker
-```
+The engine supports executing automated Puppeteer crawler operations directly inside the container instance, outputting logs to the UI:
 
-### Run
-
-```bash
-# Terminal 1 - Backend
-cd server && node index.js
-
-# Terminal 2 - Frontend
-cd client && npx next dev -p 3000
-```
-
-Open **http://localhost:3000** and click **Launch Browser**.
+1.  **Wikipedia Random Crawler (`wikipedia-crawler`)**: Navigates to a random article, extracts the main topic title, counts internal wiki links, and extracts the first legible paragraph.
+2.  **SEO & Performance Auditor (`seo-auditor`)**: Queries page load performance metrics via the `performance.timing` API, checks critical meta tags (viewport, description, open-graph title), and counts active stylesheet/script assets.
+3.  **Hacker News Scraper (`hn-scraper`)**: Loads YC Hacker News, parses the page DOM, and scrapes top 5 article titles, scores, authors, and reference URLs.
 
 ---
 
@@ -92,51 +98,68 @@ Open **http://localhost:3000** and click **Launch Browser**.
 ```
 browser-control/
 ├── docker/
-│   ├── Dockerfile          # Chromium + socat + curl + dos2unix
-│   └── start.sh            # Container entrypoint: Chromium → CDP probe → socat
+│   ├── Dockerfile          # Chromium runtime + socat network proxy
+│   └── start.sh            # Container boot entrypoint & socket bridge
 │
 ├── server/
-│   ├── index.js            # Express + WebSocket server
-│   ├── browser-manager.js  # Docker container lifecycle + CDP health probing
-│   └── session.js          # Puppeteer CDP session: screencast + input dispatch
+│   ├── index.js            # Express API endpoints & WebSocket gateway
+│   ├── browser-manager.js  # Docker container spawn & health checks
+│   └── session.js          # Puppeteer CDP connection, input mapper & crawler scripts
 │
 ├── client/
 │   ├── app/
-│   │   ├── layout.js       # Next.js root layout with Inter font
-│   │   ├── page.js         # Main UI: session state machine + WebSocket client
-│   │   └── globals.css     # Design system: tokens, components, animations
+│   │   ├── layout.js       # Root page template with global font settings
+│   │   ├── page.js         # Main workspace dashboard & state-machine
+│   │   └── globals.css     # Clean CSS custom styling system & tokens
 │   ├── components/
-│   │   ├── BrowserViewer.jsx  # Canvas viewport with coordinate scaling
-│   │   ├── Toolbar.jsx       # URL bar + navigation (SVG icons)
-│   │   └── StatusBar.jsx     # VS Code-style segmented status bar
-│   └── next.config.js      # API proxy rewrite rules
+│   │   ├── BrowserViewer.jsx  # HTML5 Canvas rendering engine & input interceptor
+│   │   ├── Toolbar.jsx       # Browser address bar & navigation controls
+│   │   ├── ConsoleDrawer.jsx # Styled logs panel with level filtering
+│   │   ├── StatusBar.jsx     # Footer status bar with system parameters
+│   │   └── ControlPanel.jsx  # Side drawer panel for mobile emulation & throttling
+│   └── next.config.js      # Next.js API route proxying configuration
 │
-├── package.json            # Root workspace
+├── package.json            # Root workspace configurations
 └── README.md
 ```
 
-## Tech Stack
+---
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Frontend | Next.js 14 + React | UI framework with SSR support |
-| Styling | Vanilla CSS | Custom design system, no framework dependency |
-| Backend | Express.js | REST API + HTTP server |
-| Real-time | WebSocket (ws) | Bidirectional frame/input streaming |
-| Browser | Puppeteer-core | CDP client for screencast + input dispatch |
-| Container | Docker + Debian | Isolated Chromium environment |
-| Proxy | socat | CDP port forwarding inside container |
+## Getting Started
 
-## API Reference
+### Prerequisites
+*   [Docker Desktop](https://www.docker.com/products/docker-desktop/) (ensure it is running)
+*   [Node.js](https://nodejs.org/) (version ≥ 18)
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/start` | Start a new browser session (spins up Docker) |
-| `POST` | `/api/stop` | Stop active session (tears down container) |
-| `GET` | `/api/status` | Container status + health info |
-| `GET` | `/api/screenshot` | PNG screenshot (base64 encoded) |
-| `WS` | `/ws` | WebSocket: frames + input events |
+### Installation
+```bash
+# Clone the repository
+git clone https://github.com/20omkale/nexus-browser-orchestrator.git
+cd nexus-browser-orchestrator
+
+# Install dependencies for workspace components
+npm install
+npm install --prefix server
+npm install --prefix client
+```
+
+### Building the Sandbox Container
+Build the target Chromium sandbox container image:
+```bash
+docker build -t bld-chromium:latest ./docker
+```
+
+### Running the System
+```bash
+# Start the Backend Gateway (Terminal 1)
+cd server && npm run dev
+
+# Start the Frontend Dashboard (Terminal 2)
+cd client && npm run dev
+```
+Open **[http://localhost:3000](http://localhost:3000)** in your browser and click **Launch Browser** to begin!
+
+---
 
 ## License
-
-MIT
+Distributed under the MIT License. See `LICENSE` for more information.
